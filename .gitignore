@@ -1,2 +1,6 @@
 .venv
 serviceAccountKey.json
+dia/
+docker/
+venv/
+__pycache__/
