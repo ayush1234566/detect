@@ -1,0 +1,141 @@
+[{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831bd"
+  },
+  "collection": "users",
+  "documents": [
+    {
+      "name": "Ayush Raj",
+      "email": "ayush@example.com",
+      "usn": "1RV21CS001"
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831be"
+  },
+  "collection": "students",
+  "documents": [
+    {
+      "usn": "1RV21CS001",
+      "name": "Ayush Raj",
+      "email": "ayush@example.com"
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831bf"
+  },
+  "collection": "teachers",
+  "documents": [
+    {
+      "teacher_code": "TCH001",
+      "name": "Dr. Sharma",
+      "email": "sharma@example.com"
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831c0"
+  },
+  "collection": "classrooms",
+  "documents": [
+    {
+      "_id": "CLASS101",
+      "teacher_code": "TCH001",
+      "college_name": "RV College of Engineering",
+      "subject": "Data Structures",
+      "max_students": 60,
+      "current_students": 1,
+      "students": [
+        "1RV21CS001"
+      ],
+      "is_active": true
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831c1"
+  },
+  "collection": "quizzes",
+  "documents": [
+    {
+      "topic": "Data Structures Quiz 1",
+      "questions": [
+        {
+          "q": "What is a stack?",
+          "options": [
+            "FIFO",
+            "LIFO"
+          ],
+          "answer": "LIFO"
+        }
+      ]
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831c2"
+  },
+  "collection": "attendance",
+  "documents": [
+    {
+      "classroom_id": "CLASS101",
+      "usn": "1RV21CS001",
+      "date": "2025-09-14",
+      "present": true,
+      "present_students": [
+        "1RV21CS001"
+      ]
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831c3"
+  },
+  "collection": "student_performance",
+  "documents": [
+    {
+      "usn": "1RV21CS001",
+      "classroom_id": "CLASS101",
+      "week": 1,
+      "score": 85
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831c4"
+  },
+  "collection": "study_materials",
+  "documents": [
+    {
+      "classroom_id": "CLASS101",
+      "type": "pdf",
+      "url": "http://example.com/ds_notes.pdf",
+      "title": "Data Structures Notes",
+      "assigned_to": [
+        "1RV21CS001"
+      ]
+    }
+  ]
+},
+{
+  "_id": {
+    "$oid": "68c698e2bf7b5d552f8831c5"
+  },
+  "collection": "transcripts",
+  "documents": [
+    {
+      "text": "Welcome to Data Structures class",
+      "type": "teacher_speech",
+      "timestamp": "2025-09-14T10:30:00Z"
+    }
+  ]
+}]

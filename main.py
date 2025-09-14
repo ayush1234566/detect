@@ -1,682 +1,310 @@
-import os
 import random
-from flask import Flask, jsonify, request
-from flask_cors import CORS
-import firebase_admin
-from firebase_admin import credentials, firestore
+import requests
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import motor.motor_asyncio
+from bson import ObjectId
+from model import SpeechModel
+import uvicorn
+from contextlib import asynccontextmanager
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+# MongoDB Connection
+client = motor.motor_asyncio.AsyncIOMotorClient("mongodb://localhost:27017")
+db = client["college_app"]
+speech_model = SpeechModel()
 
-cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
-
-@app.route('/')
-def index():
-    return "Flask app is running and connected to Firebase!"
-
-@app.route('/users', methods=['POST'])
-def create_user():
-    user_data = request.json
-    users_ref = db.collection('users')
-    doc_ref = users_ref.document()
-    doc_ref.set(user_data)
-    return jsonify({"id": doc_ref.id}), 201
-
-@app.route('/users', methods=['GET'])
-def get_users():
-    users_ref = db.collection('users')
-    docs = users_ref.stream()
-    all_users = [doc.to_dict() for doc in docs]
-    return jsonify(all_users), 200
-
-@app.route('/quizzes', methods=['POST'])
-def create_quiz():
-    quiz_data = request.json
-    quizzes_ref = db.collection('quizzes')
-    doc_ref = quizzes_ref.document()
-    doc_ref.set(quiz_data)
-    return jsonify({"id": doc_ref.id}), 201
-
-@app.route('/quizzes/<quiz_id>', methods=['GET'])
-def get_quiz(quiz_id):
-    quiz_ref = db.collection('quizzes').document(quiz_id)
-    doc = quiz_ref.get()
-    if not doc.exists:
-        return jsonify({"error": "Quiz not found"}), 404
-    return jsonify(doc.to_dict()), 200
-@app.route('/login/student', methods=['POST'])
-def student_login():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     try:
-        data = request.json
-        student_usn = data.get('usn')
-        classroom_id = data.get('classroom_id')
-        
-        if not all([student_usn, classroom_id]):
-            return jsonify({"error": "USN and Classroom ID are required."}), 400
-
-       
-        student_ref = db.collection('students').document(student_usn).get()
-        if not student_ref.exists:
-            return jsonify({"error": "Invalid student USN."}), 401
-            
-        
-        classroom_ref = db.collection('classrooms').document(classroom_id).get()
-        if not classroom_ref.exists or not classroom_ref.get('is_active'):
-            return jsonify({"error": "Classroom not found or is not active."}), 404
-        
-        return jsonify({"success": True, "message": "Student logged in successfully!"}), 200
+        await client.server_info()
+        print("✅ MongoDB connected successfully!")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/signup/student', methods=['POST'])
-def student_signup():
+        print(f"❌ MongoDB connection failed: {e}")
+        print("💡 Make sure MongoDB is running on localhost:27017")
+    yield
+    # Shutdown
+    client.close()
+    print("✅ MongoDB connection closed")
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
+class UserData(BaseModel):
+    name: str
+    email: str
+    usn: str
+
+class FacultyData(BaseModel):
+    name: str
+    email: str
+    teacher_code: str
+
+class QuizData(BaseModel):
+    topic: str
+
+class QuizAttemptData(BaseModel):
+    usn: str
+    score: int
+
+class MaterialData(BaseModel):
+    classroom_id: str
+    type: str
+    url: str
+    title: str
+    assigned_to: list = []
+
+class MarksData(BaseModel):
+    classroom_id: str
+    usn: str
+    marks: dict
+
+@app.get("/")
+async def index():
+    return "FastAPI app is running and connected to MongoDB!"
+
+@app.get("/ping-db")
+async def ping_db():
     try:
-        data = request.json
-        usn = data.get('usn')
-        name = data.get('name')
-        email = data.get('email')
-        
-        if not all([usn, name, email]):
-            return jsonify({"error": "USN, name, and email are required for signup."}), 400
-
-        student_ref = db.collection('students').document(usn)
-        if student_ref.get().exists:
-            return jsonify({"error": "Student with this USN already exists."}), 409
-
-        student_ref.set({
-            "name": name,
-            "email": email,
-            "usn": usn,
-            "created_at": firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({"success": True, "message": "Student profile created successfully!"}), 201
+        # Test MongoDB connection by inserting and retrieving a test document
+        result = await db.test_connection.insert_one({"test": "connection_check", "timestamp": "2025-09-14"})
+        user = await db.test_connection.find_one({"_id": result.inserted_id})
+        # Clean up test document
+        await db.test_connection.delete_one({"_id": result.inserted_id})
+        return {"connected": True, "message": "MongoDB connection successful!", "test_document": {"_id": str(user["_id"]), "test": user["test"]}}
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return {"connected": False, "error": str(e)}
 
-@app.route('/student/profile/<usn>', methods=['GET'])
-def get_student_profile(usn):
-    try:
-        student_ref = db.collection('students').document(usn)
-        doc = student_ref.get()
-        
-        if not doc.exists:
-            return jsonify({"error": "Student profile not found."}), 404
-        
-        # Get base student data
-        student_data = doc.to_dict()
-        
-        # Get attendance details
-        attendance_ref = db.collection('attendance')
-        attendance_docs = attendance_ref.where('usn', '==', usn).stream()
-        attendance_data = []
-        total_classes = 0
-        classes_attended = 0
-        
-        for attendance in attendance_docs:
-            att_data = attendance.to_dict()
-            attendance_data.append(att_data)
-            total_classes += 1
-            if att_data.get('present', False):
-                classes_attended += 1
-        
-        # Calculate attendance percentage
-        attendance_percentage = (classes_attended / total_classes * 100) if total_classes > 0 else 0
-        
-        # Get weekly performance
-        performance_ref = db.collection('student_performance').where('usn', '==', usn).stream()
-        weekly_performance = [perf.to_dict() for perf in performance_ref]
-        
-        # Get assigned documents (PPT, PDF)
-        documents_ref = db.collection('study_materials').where('assigned_to', 'array_contains', usn).stream()
-        assigned_documents = [doc.to_dict() for doc in documents_ref]
-        
-        return jsonify({
-            "student_info": student_data,
-            "attendance": {
-                "total_classes": total_classes,
-                "classes_attended": classes_attended,
-                "attendance_percentage": attendance_percentage,
-                "attendance_history": attendance_data
-            },
-            "weekly_performance": weekly_performance,
-            "assigned_documents": assigned_documents
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.post("/users", status_code=201)
+async def create_user(user_data: dict):
+    result = await db.users.insert_one(user_data)
+    return {"id": str(result.inserted_id)}
 
-# New endpoint for AI chatbot interactions
-@app.route('/student/chat', methods=['POST'])
-def student_chat():
-    try:
-        data = request.json
-        student_query = data.get('query')
-        document_id = data.get('document_id')  # Optional, if asking about specific document
-        
-        # Here you would integrate with your AI service
-        # For now, returning a placeholder response
-        response = {
-            "answer": f"This is a placeholder response for: {student_query}",
-            "related_documents": []
-        }
-        
-        return jsonify(response), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/signup/faculty', methods=['POST'])
-def faculty_signup():
-    try:
-        data = request.json
-        teacher_code = data.get('teacher_code')
-        name = data.get('name')
-        email = data.get('email')
-        
-        if not all([teacher_code, name, email]):
-            return jsonify({"error": "Teacher code, name, and email are required for signup."}), 400
+@app.get("/users")
+async def get_users():
+    users = []
+    cursor = db.users.find({})
+    async for user in cursor:
+        user["_id"] = str(user["_id"])
+        users.append(user)
+    return users
 
-        faculty_ref = db.collection('teachers').document(teacher_code)
-        if faculty_ref.get().exists:
-            return jsonify({"error": "Faculty with this teacher code already exists."}), 409
+@app.post("/quizzes", status_code=201)
+async def create_quiz(quiz_data: dict):
+    result = await db.quizzes.insert_one(quiz_data)
+    return {"id": str(result.inserted_id)}
 
-        faculty_ref.set({
-            "name": name,
-            "email": email,
-            "teacher_code": teacher_code,
-            "created_at": firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({"success": True, "message": "Faculty profile created successfully!"}), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.get("/quizzes/{quiz_id}")
+async def get_quiz(quiz_id: str):
+    quiz = await db.quizzes.find_one({"_id": ObjectId(quiz_id)})
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    quiz["_id"] = str(quiz["_id"])
+    return quiz
 
-@app.route('/faculty/profile/<teacher_code>', methods=['GET'])
-def get_faculty_profile(teacher_code):
-    try:
-        faculty_ref = db.collection('teachers').document(teacher_code)
-        doc = faculty_ref.get()
-        
-        if not doc.exists:
-            return jsonify({"error": "Faculty profile not found."}), 404
-        
-        return jsonify(doc.to_dict()), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    # Route to display the faculty dashboard
-@app.route('/dashboard/faculty/<teacher_code>', methods=['GET'])
-def faculty_dashboard(teacher_code):
-    try:
-        # Retrieve the faculty member's profile
-        faculty_ref = db.collection('teachers').document(teacher_code)
-        faculty_profile = faculty_ref.get()
+@app.post("/login/student")
+async def student_login(data: dict):
+    student_usn = data.get('usn')
+    classroom_id = data.get('classroom_id')
+    if not all([student_usn, classroom_id]):
+        raise HTTPException(status_code=400, detail="USN and Classroom ID are required.")
+    student = await db.students.find_one({"usn": student_usn})
+    if not student:
+        raise HTTPException(status_code=401, detail="Invalid student USN.")
+    classroom = await db.classrooms.find_one({"_id": classroom_id})
+    if not classroom or not classroom.get("is_active"):
+        raise HTTPException(status_code=404, detail="Classroom not found or is not active.")
+    return {"success": True, "message": "Student logged in successfully!"}
 
-        if not faculty_profile.exists:
-            return jsonify({"error": "Faculty profile not found."}), 404
-        
-        # Retrieve classes associated with the faculty member
-        classes_ref = db.collection('classrooms').where('teacher_code', '==', teacher_code)
-        classes_docs = classes_ref.stream()
-        
-        my_classes = []
-        for doc in classes_docs:
-            class_data = doc.to_dict()
-            class_data['classroom_id'] = doc.id
-            
-            # Get student performance for this class
-            performance_ref = db.collection('student_performance').where('classroom_id', '==', doc.id).stream()
-            class_performance = [perf.to_dict() for perf in performance_ref]
-            
-            # Get attendance data for this class
-            attendance_ref = db.collection('attendance').where('classroom_id', '==', doc.id).stream()
-            attendance_data = [att.to_dict() for att in attendance_ref]
-            
-            # Calculate class statistics
-            total_students = len(class_data.get('students', []))
-            avg_attendance = sum(len(att.get('present_students', [])) for att in attendance_data) / len(attendance_data) if attendance_data else 0
-            
-            class_data.update({
-                'total_students': total_students,
-                'average_attendance': avg_attendance,
-                'performance_data': class_performance,
-                'attendance_history': attendance_data
-            })
-            
-            my_classes.append(class_data)
-        
-        return jsonify({
-            "success": True,
-            "message": "Faculty dashboard data retrieved.",
-            "profile": faculty_profile.to_dict(),
-            "my_classes": my_classes
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Route to create a new class
-@app.route('/create_class', methods=['POST'])
-def create_class():
-    try:
-        data = request.json
-        classroom_id = data.get('classroom_id')
-        teacher_code = data.get('teacher_code')
-        college_name = data.get('college_name')
-        subject = data.get('subject', '')  # Optional subject name
-        max_students = data.get('max_students', 60)  # Default max students
-        
-        if not all([classroom_id, teacher_code, college_name]):
-            return jsonify({"error": "Classroom ID, teacher code, and college name are required."}), 400
-
-        # Check if the teacher code exists
-        teacher_ref = db.collection('teachers').document(teacher_code).get()
-        if not teacher_ref.exists:
-            return jsonify({"error": "Invalid teacher code."}), 401
-
-        # Check if classroom already exists
-        existing_class = db.collection('classrooms').document(classroom_id).get()
-        if existing_class.exists:
-            return jsonify({"error": "Classroom ID already exists."}), 409
-
-        # Save the new class to the database
-        classroom_ref = db.collection('classrooms').document(classroom_id)
-        classroom_ref.set({
-            "teacher_code": teacher_code,
-            "college_name": college_name,
-            "subject": subject,
-            "max_students": max_students,
-            "current_students": 0,
-            "students": [],
-            "is_active": True,
-            "created_at": firestore.SERVER_TIMESTAMP,
-            "last_updated": firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({"success": True, "message": "Class created successfully!"}), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/my_classes/<teacher_code>', methods=['GET'])
-def get_my_classes(teacher_code):
-    try:
-        # Retrieve all classes associated with the given teacher_code
-        classes_ref = db.collection('classrooms').where('teacher_code', '==', teacher_code)
-        docs = classes_ref.stream()
-
-        class_list = []
-        for doc in docs:
-            class_data = doc.to_dict()
-            class_data['classroom_id'] = doc.id
-            class_list.append(class_data)
-        
-        return jsonify(class_list), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/class_details/<classroom_id>', methods=['GET'])
-def get_class_details(classroom_id):
-    try:
-        # 1. Retrieve the classroom details
-        classroom_ref = db.collection('classrooms').document(classroom_id)
-        classroom_doc = classroom_ref.get()
-
-        if not classroom_doc.exists:
-            return jsonify({"error": "Classroom not found."}), 404
-
-        class_details = classroom_doc.to_dict()
-        class_details['classroom_id'] = classroom_doc.id
-
-        # 2. Get enrolled students details
-        enrolled_students = []
-        student_usns = class_details.get('students', [])
-        for usn in student_usns:
-            student_ref = db.collection('students').document(usn).get()
-            if student_ref.exists:
-                student_data = student_ref.to_dict()
-                enrolled_students.append(student_data)
-
-        # 3. Get today's attendance
-        today = firestore.SERVER_TIMESTAMP
-        attendance_ref = db.collection('attendance')\
-            .where('classroom_id', '==', classroom_id)\
-            .order_by('date', direction=firestore.Query.DESCENDING)\
-            .limit(1)\
-            .stream()
-        
-        today_attendance = next(attendance_ref, None)
-        present_students = len(today_attendance.get('present_students', [])) if today_attendance else 0
-
-        # 4. Get recent study materials
-        materials_ref = db.collection('study_materials')\
-            .where('classroom_id', '==', classroom_id)\
-            .order_by('uploaded_at', direction=firestore.Query.DESCENDING)\
-            .limit(5)\
-            .stream()
-        recent_materials = [mat.to_dict() for mat in materials_ref]
-
-        # 5. Calculate class statistics
-        total_enrolled = len(enrolled_students)
-        attendance_percentage = (present_students / total_enrolled * 100) if total_enrolled > 0 else 0
-
-        return jsonify({
-            "success": True,
-            "class_details": {
-                **class_details,
-                "enrolled_students": enrolled_students,
-                "total_enrolled": total_enrolled,
-                "today_attendance": {
-                    "present": present_students,
-                    "percentage": attendance_percentage
-                }
-            },
-            "recent_materials": recent_materials
-        }), 200
-
-        return jsonify({
-            "success": True,
-            "message": f"Details for class {classroom_id} retrieved.",
-            "class_details": class_details,
-            "student_details": student_list,
-            "topics_covered": topics_covered,
-            "schedule": schedule,
-            "notes": notes
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/class_details/<classroom_id>/confirm', methods=['POST'])
-def confirm_class_details(classroom_id):
-    try:
-        # Update the class status to 'confirmed' or 'active'
-        classroom_ref = db.collection('classrooms').document(classroom_id)
-        classroom_ref.update({"status": "confirmed"})
-
-        return jsonify({
-            "success": True,
-            "message": f"Class {classroom_id} details confirmed. Redirecting to dashboard."
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/login/faculty', methods=['POST'])
-def faculty_login():
-    try:
-        data = request.json
-        teacher_code = data.get('teacher_code')
-        college_name = data.get('college_name')
-
-        if not all([teacher_code, college_name]):
-            return jsonify({"error": "Teacher code and college name are required."}), 400
-
-        # Verify the teacher code in the database
-        teacher_ref = db.collection('teachers').document(teacher_code).get()
-        if not teacher_ref.exists:
-            return jsonify({"error": "Invalid teacher code."}), 401
-
-        # Generate a unique ID for the classroom
-        classroom_id = f"{college_name}_{block_name}_{classroom_name}".replace(" ", "_").lower()
-
-        # Update or create the classroom data in Firestore
-        classroom_ref = db.collection('classrooms').document(classroom_id)
-        classroom_ref.set({
-            "college_name": college_name,
-            "block_name": block_name,
-            "classroom_name": classroom_name,
-            "teacher_code": teacher_code,
-            "is_active": True,
-            "last_login": firestore.SERVER_TIMESTAMP
-        }, merge=True)
-        
-        # Return the dashboard options for the frontend to render
-        dashboard_options = {
-            "take_attendance_url": f"/attendance/{classroom_id}",
-            "notes_url": f"/notes/{classroom_id}",
-            "quiz_url": f"/quiz/{classroom_id}",
-            "dashboard_url": f"/dashboard/faculty/{teacher_code}"
-        }
-
-        return jsonify({
-            "success": True, 
-            "message": "Faculty logged in successfully!",
-            "classroom_id": classroom_id,
-            "dashboard_options": dashboard_options
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/attendance/<classroom_id>', methods=['POST'])
-def take_attendance(classroom_id):
-    usns = request.json.get('usns')
-    attendance_ref = db.collection('attendance').document()
-
-    attendance_data = {
-        "classroom_id": classroom_id,
-        "date": firestore.SERVER_TIMESTAMP,
-        "present_students": usns,
-        "status": "pending_teacher_confirmation"
-    }
-
-    attendance_ref.set(attendance_data)
-    
-    return jsonify({
-        "success": True,
-        "message": "Attendance recorded. Awaiting teacher confirmation.",
-        "attendance_id": attendance_ref.id
-    }), 201
-@app.route('/notes/<classroom_id>', methods=['GET'])
-def get_notes(classroom_id):
-    notes_ref = db.collection('notes').where('classroom_id', '==', classroom_id)
-    docs = notes_ref.stream()
-
-    modules = []
-    for doc in docs:
-        module_data = doc.to_dict()
-        modules.append(module_data)
-
-    return jsonify(modules), 200
-@app.route('/student_dashboard/<classroom_id>', methods=['GET'])
-def get_student_dashboard(classroom_id):
-    quiz_attempts_ref = db.collection('quiz_attempts').where('classroom_id', '==', classroom_id)
-    docs = quiz_attempts_ref.stream()
-
-    student_scores = {}
-    
-    for doc in docs:
-        attempt_data = doc.to_dict()
-        usn = attempt_data.get('usn')
-        score = attempt_data.get('score', 0)
-        
-        if usn not in student_scores:
-            student_scores[usn] = 0
-        student_scores[usn] += score
-
-    dashboard_data = []
-    
-    for usn, score in student_scores.items():
-        student_ref = db.collection('students').document(usn).get()
-        student_name = student_ref.get('name') if student_ref.exists else 'Unknown'
-        dashboard_data.append({
-            'usn': usn,
-            'name': student_name,
-            'score': score
-        })
-
-    dashboard_data.sort(key=lambda x: x['score'], reverse=True)
-
-    for i, student in enumerate(dashboard_data):
-        student['rank'] = i + 1
-
-    return jsonify(dashboard_data), 200
-import requests # Make sure this is installed (pip install requests)
-
-import random  # Add this at the top of your file if not already present
-
-@app.route('/quiz/<classroom_id>/generate', methods=['POST'])
-def generate_quiz(classroom_id):
-    try:
-        quiz_data = request.json
-        topic = quiz_data.get('topic')
-        
-        if not topic:
-            return jsonify({"error": "Topic is required"}), 400
-
-        # Generate a simple quiz (sample questions)
-        sample_questions = [
-            {
-                "question": f"What is {topic}?",
-                "options": [
-                    f"A basic {topic}",
-                    f"An advanced {topic}",
-                    f"A complex {topic}",
-                    f"None of the above"
-                ],
-                "correct_answer": 0
-            },
-            {
-                "question": f"Which of the following is related to {topic}?",
-                "options": [
-                    "Option 1",
-                    "Option 2",
-                    "Option 3",
-                    "All of the above"
-                ],
-                "correct_answer": 3
-            }
-        ]
-        
-        # Save the generated quiz to the 'quizzes' collection
-        quiz_ref = db.collection('quizzes').document()
-        quiz_ref.set({
-            "classroom_id": classroom_id,
-            "topic": topic,
-            "questions": sample_questions,
-            "generated_at": firestore.SERVER_TIMESTAMP
-        })
-
-        return jsonify({
-            "success": True,
-            "message": "Quiz generated and saved.",
-            "quiz_id": quiz_ref.id,
-            "quiz_questions": sample_questions
-        }), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Endpoint to save the student's quiz attempt
-@app.route('/quiz/<quiz_id>/attempt', methods=['POST'])
-def save_quiz_attempt(quiz_id):
-    attempt_data = request.json
-    quiz_attempts_ref = db.collection('quiz_attempts').document()
-    quiz_attempts_ref.set({
-        "quiz_id": quiz_id,
-        "usn": attempt_data.get('usn'),
-        "score": attempt_data.get('score'),
-        "attempted_at": firestore.SERVER_TIMESTAMP
-    })
-    
-    return jsonify({"success": True, "message": "Quiz attempt saved."}), 201
-@app.route('/quiz/response', methods=['POST'])
-def save_quiz_response():
-    data = request.json
-    quiz_id = data.get('quiz_id')
+@app.post("/signup/student", status_code=201)
+async def student_signup(data: dict):
     usn = data.get('usn')
-    answered = data.get('answered')
-    
-    response_data = {
-        "quiz_id": quiz_id,
-        "usn": usn,
-        "answered": answered,  # True for yes, False for no/not answered
-        "timestamp": firestore.SERVER_TIMESTAMP
+    name = data.get('name')
+    email = data.get('email')
+    if not all([usn, name, email]):
+        raise HTTPException(status_code=400, detail="USN, name, and email are required for signup.")
+    existing = await db.students.find_one({"usn": usn})
+    if existing:
+        raise HTTPException(status_code=409, detail="Student with this USN already exists.")
+    await db.students.insert_one({"usn": usn, "name": name, "email": email})
+    return {"success": True, "message": "Student profile created successfully!"}
+
+@app.get("/student/profile/{usn}")
+async def get_student_profile(usn: str):
+    student = await db.students.find_one({"usn": usn})
+    if not student:
+        raise HTTPException(status_code=404, detail="Student profile not found.")
+    attendance_cursor = db.attendance.find({"usn": usn})
+    attendance_data, total_classes, classes_attended = [], 0, 0
+    async for att in attendance_cursor:
+        attendance_data.append(att)
+        total_classes += 1
+        if att.get("present", False):
+            classes_attended += 1
+    attendance_percentage = (classes_attended / total_classes * 100) if total_classes > 0 else 0
+    performance_cursor = db.student_performance.find({"usn": usn})
+    weekly_performance = [perf async for perf in performance_cursor]
+    documents_cursor = db.study_materials.find({"assigned_to": usn})
+    assigned_documents = [doc async for doc in documents_cursor]
+    return {
+        "student_info": student,
+        "attendance": {
+            "total_classes": total_classes,
+            "classes_attended": classes_attended,
+            "attendance_percentage": attendance_percentage,
+            "attendance_history": attendance_data
+        },
+        "weekly_performance": weekly_performance,
+        "assigned_documents": assigned_documents
     }
-    
-    db.collection('quiz_responses').add(response_data)
-    
-    return jsonify({"success": True, "message": "Response saved."}), 201
 
-    
+@app.post("/student/chat")
+async def student_chat(data: dict):
+    student_query = data.get('query')
+    document_id = data.get('document_id')
+    response = {
+        "answer": f"This is a placeholder response for: {student_query}",
+        "related_documents": []
+    }
+    return response
 
-# Faculty endpoints for managing marks and materials
-@app.route('/faculty/add-marks', methods=['POST'])
-def add_student_marks():
-    try:
-        data = request.json
-        classroom_id = data.get('classroom_id')
-        usn = data.get('usn')
-        marks_data = data.get('marks')  # { "test1": 85, "assignment1": 90, etc. }
-        
-        if not all([classroom_id, usn, marks_data]):
-            return jsonify({"error": "Missing required fields"}), 400
-            
-        performance_ref = db.collection('student_performance').document()
-        performance_ref.set({
-            "classroom_id": classroom_id,
-            "usn": usn,
-            "marks": marks_data,
-            "timestamp": firestore.SERVER_TIMESTAMP
+@app.post("/signup/faculty", status_code=201)
+async def faculty_signup(data: dict):
+    teacher_code = data.get('teacher_code')
+    name = data.get('name')
+    email = data.get('email')
+    if not all([teacher_code, name, email]):
+        raise HTTPException(status_code=400, detail="Teacher code, name, and email are required for signup.")
+    existing = await db.teachers.find_one({"teacher_code": teacher_code})
+    if existing:
+        raise HTTPException(status_code=409, detail="Faculty with this teacher code already exists.")
+    await db.teachers.insert_one({"teacher_code": teacher_code, "name": name, "email": email})
+    return {"success": True, "message": "Faculty profile created successfully!"}
+
+@app.get("/faculty/profile/{teacher_code}")
+async def get_faculty_profile(teacher_code: str):
+    faculty = await db.teachers.find_one({"teacher_code": teacher_code})
+    if not faculty:
+        raise HTTPException(status_code=404, detail="Faculty profile not found.")
+    return faculty
+
+@app.get("/dashboard/faculty/{teacher_code}")
+async def faculty_dashboard(teacher_code: str):
+    faculty = await db.teachers.find_one({"teacher_code": teacher_code})
+    if not faculty:
+        raise HTTPException(status_code=404, detail="Faculty profile not found.")
+    classes_cursor = db.classrooms.find({"teacher_code": teacher_code})
+    my_classes = []
+    async for doc in classes_cursor:
+        performance_cursor = db.student_performance.find({"classroom_id": doc["_id"]})
+        class_performance = [perf async for perf in performance_cursor]
+        attendance_cursor = db.attendance.find({"classroom_id": doc["_id"]})
+        attendance_data = [att async for att in attendance_cursor]
+        total_students = len(doc.get("students", []))
+        avg_attendance = sum(len(att.get("present_students", [])) for att in attendance_data) / len(attendance_data) if attendance_data else 0
+        doc.update({
+            "total_students": total_students,
+            "average_attendance": avg_attendance,
+            "performance_data": class_performance,
+            "attendance_history": attendance_data
         })
-        
-        return jsonify({
-            "success": True,
-            "message": "Marks added successfully"
-        }), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        my_classes.append(doc)
+    return {"success": True, "message": "Faculty dashboard data retrieved.", "profile": faculty, "my_classes": my_classes}
 
-@app.route('/faculty/upload-material', methods=['POST'])
-def upload_material():
-    try:
-        data = request.json
-        classroom_id = data.get('classroom_id')
-        material_type = data.get('type')  # 'pdf' or 'ppt'
-        material_url = data.get('url')
-        title = data.get('title')
-        assigned_to = data.get('assigned_to', [])  # List of student USNs
-        
-        if not all([classroom_id, material_type, material_url, title]):
-            return jsonify({"error": "Missing required fields"}), 400
-            
-        material_ref = db.collection('study_materials').document()
-        material_ref.set({
-            "classroom_id": classroom_id,
-            "type": material_type,
-            "url": material_url,
-            "title": title,
-            "assigned_to": assigned_to,
-            "uploaded_at": firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({
-            "success": True,
-            "message": "Material uploaded successfully",
-            "material_id": material_ref.id
-        }), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.post("/create_class", status_code=201)
+async def create_class(data: dict):
+    classroom_id = data.get('classroom_id')
+    teacher_code = data.get('teacher_code')
+    college_name = data.get('college_name')
+    subject = data.get('subject', '')
+    max_students = data.get('max_students', 60)
+    if not all([classroom_id, teacher_code, college_name]):
+        raise HTTPException(status_code=400, detail="Classroom ID, teacher code, and college name are required.")
+    teacher = await db.teachers.find_one({"teacher_code": teacher_code})
+    if not teacher:
+        raise HTTPException(status_code=401, detail="Invalid teacher code.")
+    existing_class = await db.classrooms.find_one({"_id": classroom_id})
+    if existing_class:
+        raise HTTPException(status_code=409, detail="Classroom ID already exists.")
+    await db.classrooms.insert_one({
+        "_id": classroom_id,
+        "teacher_code": teacher_code,
+        "college_name": college_name,
+        "subject": subject,
+        "max_students": max_students,
+        "current_students": 0,
+        "students": [],
+        "is_active": True
+    })
+    return {"success": True, "message": "Class created successfully!"}
 
-@app.route('/student/attendance/summary/<usn>', methods=['GET'])
-def get_student_attendance_summary(usn):
-    try:
-        # Get all attendance records for the student
-        attendance_ref = db.collection('attendance')
-        attendance_docs = attendance_ref.where('present_students', 'array_contains', usn).stream()
-        
-        attendance_history = []
-        total_classes = 0
-        classes_attended = 0
-        
-        for doc in attendance_docs:
-            data = doc.to_dict()
-            attendance_history.append(data)
-            total_classes += 1
-            if usn in data.get('present_students', []):
-                classes_attended += 1
-        
-        attendance_percentage = (classes_attended / total_classes * 100) if total_classes > 0 else 0
-        
-        return jsonify({
-            "success": True,
-            "summary": {
-                "total_classes": total_classes,
-                "classes_attended": classes_attended,
-                "attendance_percentage": attendance_percentage
-            },
-            "attendance_history": attendance_history
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.get("/my_classes/{teacher_code}")
+async def get_my_classes(teacher_code: str):
+    cursor = db.classrooms.find({"teacher_code": teacher_code})
+    class_list = []
+    async for doc in cursor:
+        class_list.append(doc)
+    return class_list
+
+@app.post("/speech/listen")
+async def start_listening():
+    text = speech_model.listen_from_microphone()
+    if text:
+        transcript_data = {"text": text, "type": "teacher_speech"}
+        result = await db.transcripts.insert_one(transcript_data)
+        return {"success": True, "text": text, "transcript_id": str(result.inserted_id)}
+    else:
+        raise HTTPException(status_code=400, detail="Could not understand audio")
+
+@app.post("/speech/speak")
+async def text_to_speech(data: dict):
+    text = data.get('text', '')
+    if not text:
+        raise HTTPException(status_code=400, detail="No text provided")
+    speech_model.text_to_speech(text)
+    return {"success": True, "message": "Text converted to speech successfully"}
+
+@app.get("/speech/transcripts")
+async def get_transcripts():
+    transcripts = []
+    cursor = db.transcripts.find({})
+    async for doc in cursor:
+        doc["_id"] = str(doc["_id"])
+        transcripts.append(doc)
+    return {"success": True, "transcripts": transcripts}
+
+@app.get("/speech/test-microphone")
+async def test_microphone():
+    return {"success": True, "message": "Speech recognition is ready", "engines": speech_model.get_available_engines()}
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    print("🚀 Starting FastAPI Server...")
+    print(f"📡 Server will be available at:")
+    print(f"   • http://localhost:5000")
+    print(f"   • http://127.0.0.1:5000")
+    print(f"   • http://0.0.0.0:5000")
+    print("🔄 Auto-reload enabled for development")
+    print("=" * 50)
+    
+    try:
+        uvicorn.run(
+            "main:app", 
+            host="0.0.0.0", 
+            port=5000, 
+            reload=True,
+            log_level="info"
+        )
+    except Exception as e:
+        print(f"❌ Error starting server: {e}")
+        print("💡 Try running: pip install uvicorn fastapi motor")
+        input("Press Enter to exit...")
